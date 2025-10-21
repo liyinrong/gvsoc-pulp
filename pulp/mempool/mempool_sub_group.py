@@ -66,6 +66,23 @@ class Sub_group(st.Component):
                 tile_itf_list.append(itf)
             sub_group_out_interfaces.append(tile_itf_list)
 
+        if async_l1_interco:
+            sub_group_local_resp_interleaver = Interleaver(self, 'sub_group_local_resp_interleaver', nb_slaves=nb_tiles_per_sub_group, nb_masters=nb_tiles_per_sub_group,
+                interleaving_bits=int(math.log2(4*nb_cores_per_tile*bank_factor)), offset_translation=False)
+
+            sub_group_remote_resp_interleavers = []
+            for i in range(0, nb_remote_sub_group_ports):
+                sub_group_remote_resp_interleavers.append(Interleaver(self, f'sub_group_remote_resp_interleaver_{i}', nb_slaves=nb_tiles_per_sub_group, nb_masters=nb_tiles_per_sub_group, interleaving_bits=int(math.log2(4*nb_cores_per_tile*bank_factor)), offset_translation=False))
+
+            sub_group_resp_out_interfaces = []
+            for port in range(0, nb_remote_group_ports):
+                tile_itf_list = []
+                for i in range(0, nb_tiles_per_sub_group):
+                    itf = router.Router(self, f'sub_group_remote_resp_out_itf{port}_tile{i}', latency=1, bandwidth=4, shared_rw_bandwidth=True, synchronous=False, max_input_pending_size=4)
+                    itf.add_mapping('output')
+                    tile_itf_list.append(itf)
+                sub_group_resp_out_interfaces.append(tile_itf_list)
+
         # DMA network(virtual, to emulate multiple backends)
         # DMA TCDM Interface
         dma_tcdm_itf = router.Router(self, f'dma_tcdm_itf', bandwidth=axi_data_width)
@@ -103,6 +120,15 @@ class Sub_group(st.Component):
         for i in range(0, nb_tiles_per_sub_group):
             self.bind(sub_group_local_interleaver, 'out_%d' % i, self.tile_list[i], 'loc_remt_slave_in')
 
+        if async_l1_interco:
+            #Tile local resp master -> Group local resp interconnect
+            for i in range(0, nb_tiles_per_sub_group):
+                self.bind(self.tile_list[i], 'loc_remt_resp_out', sub_group_local_resp_interleaver, 'in_%d' % i)
+
+            #Group local resp interconnect -> Tile local resp slave
+            for i in range(0, nb_tiles_per_sub_group):
+                self.bind(sub_group_local_resp_interleaver, 'out_%d' % i, self.tile_list[i], 'loc_remt_resp_in')
+
         #Tile sub group remote master -> Sub Group remote interleavers
         for port in range(0, nb_remote_sub_group_ports):
             for i in range(0, nb_tiles_per_sub_group):
@@ -112,6 +138,17 @@ class Sub_group(st.Component):
         for port in range(0, nb_remote_sub_group_ports):
             for i in range(0, nb_tiles_per_sub_group):
                 self.bind(sub_group_remote_master_interleavers[port], 'out_%d' % i, sub_group_out_interfaces[port][i], 'input')
+
+        if async_l1_interco:
+            #Tile sub group remote resp -> Sub Group remote resp interleavers
+            for port in range(0, nb_remote_sub_group_ports):
+                for i in range(0, nb_tiles_per_sub_group):
+                    self.bind(self.tile_list[i], f'sub_grp_remt{port}_resp_out', sub_group_remote_resp_interleavers[port], 'in_%d' % i)
+
+            #Sub group remote resp interleavers -> Sub group remote resp routers
+            for port in range(0, nb_remote_sub_group_ports):
+                for i in range(0, nb_tiles_per_sub_group):
+                    self.bind(sub_group_remote_resp_interleavers[port], 'out_%d' % i, sub_group_resp_out_interfaces[port][i], 'input')
 
         #Tile axi port -> axi interconnect
         for i in range(0, nb_tiles_per_sub_group):
@@ -141,11 +178,25 @@ class Sub_group(st.Component):
                 self.bind(self, f'grp_remt{port}_tile{i}_slave_in', self.tile_list[i], f'grp_remt{port}_slave_in')
                 self.bind(self.tile_list[i], f'grp_remt{port}_master_out', self, f'grp_remt{port}_tile{i}_master_out')
 
+        if async_l1_interco:
+            # Remote TCDM response interface between tiles to the group
+            for port in range(0, nb_remote_group_ports):
+                for i in range(0, nb_tiles_per_sub_group):
+                    self.bind(self, f'grp_remt{port}_tile{i}_resp_in', self.tile_list[i], f'grp_remt{port}_resp_in')
+                    self.bind(self.tile_list[i], f'grp_remt{port}_resp_out', self, f'grp_remt{port}_tile{i}_resp_out')
+
         # Remote TCDM interface between tiles to the sub group
         for port in range(0, nb_remote_sub_group_ports):
             for i in range(0, nb_tiles_per_sub_group):
                 self.bind(self, f'sub_grp_remt{port+1}_tile{i}_slave_in', self.tile_list[i], f'sub_grp_remt{port}_slave_in')
                 self.bind(sub_group_out_interfaces[port][i], 'output', self, f'sub_grp_remt{port+1}_tile{i}_master_out')
+
+        if async_l1_interco:
+            # Remote TCDM response interface between tiles to the sub group
+            for port in range(0, nb_remote_sub_group_ports):
+                for i in range(0, nb_tiles_per_sub_group):
+                    self.bind(self, f'sub_grp_remt{port+1}_tile{i}_resp_in', self.tile_list[i], f'sub_grp_remt{port}_resp_in')
+                    self.bind(sub_group_resp_out_interfaces[port][i], 'output', self, f'sub_grp_remt{port+1}_tile{i}_resp_out')
 
         # Propagate the barrier signals from the tiles to the group boundary
         for i in range(0, nb_tiles_per_sub_group):

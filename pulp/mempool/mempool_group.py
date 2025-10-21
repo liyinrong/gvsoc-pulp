@@ -80,6 +80,24 @@ class Group(st.Component):
                         tile_itf_list.append(itf)
                     sub_group_itf_list.append(tile_itf_list)
                 group_remote_out_interfaces.append(sub_group_itf_list)
+
+            if async_l1_interco:
+                group_remote_resp_interleavers = []
+                for i in range(0, nb_remote_group_ports):
+                    group_remote_resp_interleavers.append(Interleaver(self, f'group_remote_resp_interleaver_{i}', nb_slaves=nb_sub_groups_per_group*nb_tiles_per_sub_group,
+                        nb_masters=nb_sub_groups_per_group*nb_tiles_per_sub_group, interleaving_bits=int(math.log2(4*nb_cores_per_tile*bank_factor)), offset_translation=False))
+
+                group_remote_resp_out_interfaces = []
+                for port in range(0, nb_remote_group_ports):
+                    sub_group_itf_list = []
+                    for i in range(0, nb_sub_groups_per_group):
+                        tile_itf_list = []
+                        for j in range(0, nb_tiles_per_sub_group):
+                            itf = router.Router(self, f'group_remote_resp_out_itf{port}_sg{i}_tile{j}', latency=1, bandwidth=4, shared_rw_bandwidth=True, synchronous=False, max_input_pending_size=4)
+                            itf.add_mapping('output')
+                            tile_itf_list.append(itf)
+                        sub_group_itf_list.append(tile_itf_list)
+                    group_remote_resp_out_interfaces.append(sub_group_itf_list)
         else:
             #Group local interconnect
             group_local_interleaver = Interleaver(self, 'group_local_interleaver', nb_slaves=nb_tiles_per_group, nb_masters=nb_tiles_per_group,
@@ -166,6 +184,17 @@ class Group(st.Component):
                             self.bind(self.sub_group_list[ini], f'sub_grp_remt{ini^tgt}_tile{tile}_master_out', debug_router, 'input')
                             self.bind(debug_router, 'output', self.sub_group_list[tgt], f'sub_grp_remt{ini^tgt}_tile{tile}_slave_in')
 
+            if async_l1_interco:
+                #Sub group master response output -> Sub group slave response input
+                for ini in range(0, nb_sub_groups_per_group):
+                    for tgt in range(0, nb_sub_groups_per_group):
+                        if (ini != tgt):
+                            for tile in range(0, nb_tiles_per_sub_group):
+                                debug_router=router.Router(self, 'debug_resp_router_ini%d_tgt%d_tile%d' % (ini, tgt, tile))
+                                debug_router.add_mapping("output")
+                                self.bind(self.sub_group_list[ini], f'sub_grp_remt{ini^tgt}_tile{tile}_resp_out', debug_router, 'input')
+                                self.bind(debug_router, 'output', self.sub_group_list[tgt], f'sub_grp_remt{ini^tgt}_tile{tile}_resp_in')
+
             #Tile remote master -> Group remote interleavers
             for port in range(0, nb_remote_group_ports):
                 for i in range(0, nb_sub_groups_per_group):
@@ -177,6 +206,19 @@ class Group(st.Component):
                 for i in range(0, nb_sub_groups_per_group):
                     for j in range(0, nb_tiles_per_sub_group):
                         self.bind(group_remote_master_interleavers[port], 'out_%d' % (j + i * nb_tiles_per_sub_group), group_remote_out_interfaces[port][i][j], 'input')
+
+            if async_l1_interco:
+                #Tile remote master response -> Group remote response interleavers
+                for port in range(0, nb_remote_group_ports):
+                    for i in range(0, nb_sub_groups_per_group):
+                        for j in range(0, nb_tiles_per_sub_group):
+                            self.bind(self.sub_group_list[i], f'grp_remt{port}_tile{j}_resp_out', group_remote_resp_interleavers[port], 'in_%d' % (j + i * nb_tiles_per_sub_group))
+
+                #Group remote response interleavers -> Group remote response routers
+                for port in range(0, nb_remote_group_ports):
+                    for i in range(0, nb_sub_groups_per_group):
+                        for j in range(0, nb_tiles_per_sub_group):
+                            self.bind(group_remote_resp_interleavers[port], 'out_%d' % (j + i * nb_tiles_per_sub_group), group_remote_resp_out_interfaces[port][i][j], 'input')
         else:
             #Tile local master -> Group local interconnect
             for i in range(0, nb_tiles_per_group):
@@ -249,6 +291,14 @@ class Group(st.Component):
                     for j in range(0, nb_tiles_per_sub_group):
                         self.bind(self, f'grp_remt{port+1}_sg{i}_tile{j}_slave_in', self.sub_group_list[i], f'grp_remt{port}_tile{j}_slave_in')
                         self.bind(group_remote_out_interfaces[port][i][j], 'output', self, f'grp_remt{port+1}_sg{i}_tile{j}_master_out')
+
+            if async_l1_interco:
+                # Remote TCDM response interface between tiles to the group
+                for port in range(0, nb_remote_group_ports):
+                    for i in range(0, nb_sub_groups_per_group):
+                        for j in range(0, nb_tiles_per_sub_group):
+                            self.bind(self, f'grp_remt{port+1}_sg{i}_tile{j}_resp_in', self.sub_group_list[i], f'grp_remt{port}_tile{j}_resp_in')
+                            self.bind(group_remote_resp_out_interfaces[port][i][j], 'output', self, f'grp_remt{port+1}_sg{i}_tile{j}_resp_out')
 
         else:
             # Remote TCDM interface between tiles to the group

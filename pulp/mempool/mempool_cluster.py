@@ -82,6 +82,16 @@ class Cluster(st.Component):
                                 debug_router.add_mapping("output")
                                 self.bind(self.group_list[ini], f'grp_remt{ini^tgt}_sg{sg}_tile{tile}_master_out', debug_router, 'input')
                                 self.bind(debug_router, 'output', self.group_list[tgt], f'grp_remt{ini^tgt}_sg{sg}_tile{tile}_slave_in')
+            if async_l1_interco:
+                for ini in range(0, nb_groups):
+                    for tgt in range(0, nb_groups):
+                        if (ini != tgt):
+                            for sg in range(0, nb_sub_groups_per_group):
+                                for tile in range(0, nb_tiles_per_group):
+                                    debug_router=router.Router(self, 'debug_resp_router_ini%d_tgt%d_sg%d_tile%d' % (ini, tgt, sg, tile))
+                                    debug_router.add_mapping("output")
+                                    self.bind(self.group_list[ini], f'grp_remt{ini^tgt}_sg{sg}_tile{tile}_resp_out', debug_router, 'input')
+                                    self.bind(debug_router, 'output', self.group_list[tgt], f'grp_remt{ini^tgt}_sg{sg}_tile{tile}_resp_in')
         else:
             for ini in range(0, nb_groups):
                 for tgt in range(0, nb_groups):

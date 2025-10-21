@@ -24,6 +24,7 @@ import interco.router as router
 import gvsoc.systree as st
 from pulp.snitch.sequencer import Sequencer
 from pulp.mempool.l1_address_scrambler import L1_AddressScrambler
+from pulp.mempool.l1_interconnect.l1_xbar_itf import L1_XbarItf
 
 class Tile(st.Component):
 
@@ -41,6 +42,7 @@ class Tile(st.Component):
         # Hardware parameters
         nb_remote_group_ports = nb_groups - 1
         nb_remote_sub_group_ports = nb_sub_groups_per_group - 1
+        nb_remote_ports = nb_remote_group_ports + nb_remote_sub_group_ports + 1
         nb_tiles_per_sub_group = int((total_cores/nb_groups/nb_sub_groups_per_group)/nb_cores_per_tile)
         # global_tile_id = tile_id + group_id * nb_tiles_per_group
         Xfrep = 0
@@ -100,6 +102,10 @@ class Tile(st.Component):
                 if Xfrep:
                     fpu_sequencers.append(Sequencer(self, f'fpu_sequencer{core_id}', latency=0))
 
+        if async_l1_interco:
+            l1_xbar_itf = L1_XbarItf(self, 'l1_xbar_itf', nb_req_ports=nb_remote_ports, nb_resp_ports=nb_remote_ports, tile_id=tile_id, sub_group_id=sub_group_id, group_id=group_id,
+                                     nb_tiles_per_sub_group=nb_tiles_per_sub_group, nb_sub_groups_per_group=nb_sub_groups_per_group, num_banks_per_tile=nb_cores_per_tile*bank_factor, byte_offset=2)
+
         ################################################################
         ##########               Design Bindings              ##########
         ################################################################
@@ -115,17 +121,46 @@ class Tile(st.Component):
             ico_list[i].add_mapping('l1', base=0x00000000, remove_offset=0x00000000, size=total_cores * bank_factor * 1024)
             self.bind(ico_list[i], 'l1', l1, f'pe_in{i}')
 
-        # L1 TCDM --> Remote TCDM interfaces
-        self.bind(self, 'loc_remt_slave_in', l1, 'remote_local_in0')
-        self.bind(l1, 'remote_local_out0', self, 'loc_remt_master_out')
+        if async_l1_interco:
+            self.bind(l1_xbar_itf, 'tcdm_req_mst_0', l1, 'remote_local_in0')
+            self.bind(l1, 'remote_local_out0', l1_xbar_itf, 'core_req_slv_0')
 
-        for i in range(0, nb_remote_sub_group_ports):
-            self.bind(self, f'sub_grp_remt{i}_slave_in', l1, f'remote_sub_group_in{i}')
-            self.bind(l1, f'remote_sub_group_out{i}', self, f'sub_grp_remt{i}_master_out')
+            for i in range(0, nb_remote_sub_group_ports):
+                self.bind(l1_xbar_itf, f'tcdm_req_mst_{i+1}', l1, f'remote_sub_group_in{i}')
+                self.bind(l1, f'remote_sub_group_out{i}', l1_xbar_itf, f'core_req_slv_{i+1}')
 
-        for i in range(0, nb_remote_group_ports):
-            self.bind(self, f'grp_remt{i}_slave_in', l1, f'remote_group_in{i}')
-            self.bind(l1, f'remote_group_out{i}', self, f'grp_remt{i}_master_out')
+            for i in range(0, nb_remote_group_ports):
+                self.bind(l1_xbar_itf, f'tcdm_req_mst_{i+1+nb_remote_sub_group_ports}', l1, f'remote_group_in{i}')
+                self.bind(l1, f'remote_group_out{i}', l1_xbar_itf, f'core_req_slv_{i+1+nb_remote_sub_group_ports}')
+
+            self.bind(self, 'loc_remt_slave_in', l1_xbar_itf, 'noc_req_slv_0')
+            self.bind(l1_xbar_itf, 'noc_req_mst_0', self, 'loc_remt_master_out')
+            self.bind(self, 'loc_remt_resp_in', l1_xbar_itf, 'noc_resp_mst_0')
+            self.bind(l1_xbar_itf, 'noc_resp_slv_0', self, 'loc_remt_resp_out')
+
+            for i in range(0, nb_remote_sub_group_ports):
+                self.bind(self, f'sub_grp_remt{i}_slave_in', l1_xbar_itf, f'noc_req_slv_{i+1}')
+                self.bind(l1_xbar_itf, f'noc_req_mst_{i+1}', self, f'sub_grp_remt{i}_master_out')
+                self.bind(self, f'sub_grp_remt{i}_resp_in', l1_xbar_itf, f'noc_resp_mst_{i+1}')
+                self.bind(l1_xbar_itf, f'noc_resp_slv_{i+1}', self, f'sub_grp_remt{i}_resp_out')
+
+            for i in range(0, nb_remote_group_ports):
+                self.bind(self, f'grp_remt{i}_slave_in', l1_xbar_itf, f'noc_req_slv_{i+1+nb_remote_sub_group_ports}')
+                self.bind(l1_xbar_itf, f'noc_req_mst_{i+1+nb_remote_sub_group_ports}', self, f'grp_remt{i}_master_out')
+                self.bind(self, f'grp_remt{i}_resp_in', l1_xbar_itf, f'noc_resp_mst_{i+1+nb_remote_sub_group_ports}')
+                self.bind(l1_xbar_itf, f'noc_resp_slv_{i+1+nb_remote_sub_group_ports}', self, f'grp_remt{i}_resp_out')
+        else:
+            # L1 TCDM --> Remote TCDM interfaces
+            self.bind(self, 'loc_remt_slave_in', l1, 'remote_local_in0')
+            self.bind(l1, 'remote_local_out0', self, 'loc_remt_master_out')
+
+            for i in range(0, nb_remote_sub_group_ports):
+                self.bind(self, f'sub_grp_remt{i}_slave_in', l1, f'remote_sub_group_in{i}')
+                self.bind(l1, f'remote_sub_group_out{i}', self, f'sub_grp_remt{i}_master_out')
+
+            for i in range(0, nb_remote_group_ports):
+                self.bind(self, f'grp_remt{i}_slave_in', l1, f'remote_group_in{i}')
+                self.bind(l1, f'remote_group_out{i}', self, f'grp_remt{i}_master_out')
 
         self.bind(self, 'dma_tcdm', l1, 'dma')
 
@@ -133,7 +168,7 @@ class Tile(st.Component):
         for i in range(0, nb_cores_per_tile):
             # Add default mapping for the others
             ico_list[i].add_mapping('axi', latency=4)
-            self.bind(ico_list[i], 'axi', axi_ico, 'input')
+            self.bind(ico_list[i], 'axi', axi_ico, 'input')          
 
         ###########################################################
         #                                       |--> ROM          #
